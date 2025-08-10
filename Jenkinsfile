@@ -2,15 +2,14 @@ pipeline {
   agent any
   options { timestamps() }
   tools {
-    jdk 'JDK11'                  // Global Tool에 등록한 JDK 이름
-    sonarqubeScanner 'SQScanner' // Global Tool에 등록한 SonarScanner 이름
+    jdk 'JDK11'   // ✅ JDK만 tools로. SonarScanner는 tool() 스텝으로 경로 resolve
   }
 
   environment {
     // Kubernetes
-    APP = 'myapp'                              // Deployment/Service/containers[].name
+    APP = 'myapp'
     NS  = 'dev'
-    IMG = "my-flask-app:${BUILD_NUMBER}"       // Docker Desktop+k8s 공유 → 로컬 태그 사용
+    IMG = "my-flask-app:${BUILD_NUMBER}"
 
     // SonarQube
     SONAR_PROJECT_KEY = 'jenkins-test'
@@ -22,7 +21,9 @@ pipeline {
     }
 
     stage('Build Docker Image') {
-      steps { bat 'docker build -t %IMG% .' }
+      steps {
+        bat 'docker build -t %IMG% .'
+      }
     }
 
     stage('Deploy to Kubernetes') {
@@ -31,20 +32,22 @@ pipeline {
           bat '''
             kubectl --kubeconfig=%KCFG% config current-context
             kubectl --kubeconfig=%KCFG% get nodes
-
-            rem ensure namespace
             kubectl --kubeconfig=%KCFG% create ns %NS% 2>NUL
-
-            rem apply manifests (idempotent)
             kubectl --kubeconfig=%KCFG% -n %NS% apply -f k8s\\deployment.yaml
             kubectl --kubeconfig=%KCFG% -n %NS% apply -f k8s\\service.yaml
-
-            rem roll out new image
             kubectl --kubeconfig=%KCFG% -n %NS% set image deploy/%APP% %APP%=%IMG%
             kubectl --kubeconfig=%KCFG% -n %NS% rollout status deploy/%APP% --timeout=180s
-
             kubectl --kubeconfig=%KCFG% -n %NS% get svc %APP% -o wide
           '''
+        }
+      }
+    }
+
+    stage('Resolve tools') {
+      steps {
+        // ✅ SonarScanner 설치 경로를 tool() 스텝으로 얻어 PATH 없이 실행
+        script {
+          env.SCANNER_HOME = tool name: 'SQScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
         }
       }
     }
@@ -52,7 +55,7 @@ pipeline {
     stage('Check tools') {
       steps {
         bat 'java -version'
-        bat 'where sonar-scanner'
+        bat '"%SCANNER_HOME%\\bin\\sonar-scanner.bat" -v'
         bat 'jmeter -v'
       }
     }
@@ -72,7 +75,6 @@ pipeline {
           alwaysLinkToLastBuild: true
         ])
         script {
-          // 요약 JSON (Express/프론트에서 쓰기 좋게)
           def stats = readJSON file: 'jmeter-report/statistics.json'
           def t = stats['Total']
           def summary = [
@@ -91,14 +93,14 @@ pipeline {
     /* ---------- SonarQube ---------- */
     stage('SonarQube Analysis') {
       steps {
-        withSonarQubeEnv('MySonar') { // Manage Jenkins > System 에 등록한 서버 이름
-          bat '''
-            sonar-scanner ^
+        withSonarQubeEnv('MySonar') {
+          bat """
+            "%SCANNER_HOME%\\bin\\sonar-scanner.bat" ^
               -Dsonar.projectKey=%SONAR_PROJECT_KEY% ^
               -Dsonar.sources=. ^
               -Dsonar.host.url=%SONAR_HOST_URL% ^
               -Dsonar.login=%SONAR_AUTH_TOKEN%
-          '''
+          """
         }
       }
     }
@@ -106,14 +108,17 @@ pipeline {
     stage('Quality Gate') {
       steps {
         timeout(time: 2, unit: 'MINUTES') {
-          def qg = waitForQualityGate() // SonarQube → Webhooks: http://<jenkins>/sonarqube-webhook/
-          writeJSON file: 'sonar-gate.json', json: [status: qg.status], pretty: 2
+          // ✅ 변수 대입이 있으니 script 블록 안에서 호출
+          script {
+            def qg = waitForQualityGate()   // Sonar → Webhook: http://<jenkins>/sonarqube-webhook/
+            writeJSON file: 'sonar-gate.json', json: [status: qg.status], pretty: 2
+          }
           archiveArtifacts artifacts: 'sonar-gate.json', fingerprint: true
         }
       }
     }
 
-    /* ---- (옵션) Express로 바로 푸시 ----
+    /* ---- (옵션) Express로 즉시 푸시 ----
     stage('Publish to DevSecOps API') {
       when { expression { return false } } // 필요 시 true로
       steps {
