@@ -70,7 +70,7 @@ pipeline {
 
         // ✅ 컨테이너에서 테스트 수행 (워크스페이스를 /tests로 마운트)
         bat """
-          docker run --rm -v "%CD%:/tests" -w /tests justb4/jmeter:5.6.3 ^
+          docker run --rm -v "%CD%:/tests" -w /tests alpine/jmeter:5.6.3 ^
             -n -t tests/smoke.jmx ^
             -l jmeter_%BUILD_NUMBER%/results.jtl ^
             -e -o jmeter_%BUILD_NUMBER%/html
