@@ -106,18 +106,24 @@ pipeline {
 
     /* ---------- SonarQube ---------- */
     stage('SonarQube Analysis') {
-      steps {
+    steps {
         withSonarQubeEnv('MySonar') {
-          bat """
-            "%SCANNER_HOME%\\bin\\sonar-scanner.bat" ^
-              -Dsonar.projectKey=%SONAR_PROJECT_KEY% ^
-              -Dsonar.sources=. ^
-              -Dsonar.host.url=%SONAR_HOST_URL% ^
-              -Dsonar.login=%SONAR_AUTH_TOKEN%
-          """
+        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+            script {
+            // Jenkins 잡 이름을 Sonar 프로젝트 키로 (허용문자만 남기고 치환)
+            def pk = env.JOB_NAME.replaceAll('[^A-Za-z0-9._-]', '-')
+            bat "\"${tool 'SQScanner'}\\bin\\sonar-scanner.bat\" " +
+              "-Dsonar.projectKey=${pk} " +
+              "-Dsonar.projectName=${pk} " +
+              "-Dsonar.sources=. " +
+              "-Dsonar.token=%SONAR_TOKEN% " +
+              "-Dsonar.host.url=http://localhost:9000"
+            }
         }
-      }
+        }
     }
+    }
+
 
     stage('Quality Gate') {
       steps {
