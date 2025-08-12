@@ -2,7 +2,7 @@ pipeline {
   agent any
   options { timestamps() }
   tools {
-    jdk 'JDK11'   // ✅ JDK만 tools로. SonarScanner는 tool() 스텝으로 경로 resolve
+    jdk 'JDK11'   // SonarScanner는 tool() 스텝으로 resolve
   }
 
   environment {
@@ -45,7 +45,6 @@ pipeline {
 
     stage('Resolve tools') {
       steps {
-        // ✅ SonarScanner 설치 경로를 tool() 스텝으로 얻어 PATH 없이 실행
         script {
           env.SCANNER_HOME = tool name: 'SQScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
         }
@@ -56,27 +55,40 @@ pipeline {
       steps {
         bat 'java -version'
         bat '"%SCANNER_HOME%\\bin\\sonar-scanner.bat" -v'
-        bat 'jmeter -v'
+        bat 'docker version'     // ✅ JMeter는 Docker로 실행하므로 docker만 확인
       }
     }
 
-    /* ---------- JMeter ---------- */
+    /* ---------- JMeter (Docker 컨테이너로 실행) ---------- */
     stage('Test - JMeter') {
       steps {
-        bat '''
-          rmdir /S /Q jmeter-report 2>NUL
-          jmeter -n -t tests\\smoke.jmx -l jmeter-results.jtl -e -o jmeter-report
-        '''
+        // 결과 디렉토리 준비
+        bat """
+          if exist jmeter_%BUILD_NUMBER% rmdir /S /Q jmeter_%BUILD_NUMBER% 2>NUL
+          mkdir jmeter_%BUILD_NUMBER%
+        """
+
+        // ✅ 컨테이너에서 테스트 수행 (워크스페이스를 /tests로 마운트)
+        bat """
+          docker run --rm -v "%CD%:/tests" -w /tests justb4/jmeter:5.6.3 ^
+            -n -t tests/smoke.jmx ^
+            -l jmeter_%BUILD_NUMBER%/results.jtl ^
+            -e -o jmeter_%BUILD_NUMBER%/html
+        """
+
+        // HTML 리포트 퍼블리시 (Publish HTML Reports 플러그인 필요)
         publishHTML(target: [
-          reportDir: 'jmeter-report',
+          reportDir: "jmeter_${env.BUILD_NUMBER}/html",
           reportFiles: 'index.html',
           reportName: 'JMeter Report',
           keepAll: true,
           alwaysLinkToLastBuild: true
         ])
+
+        // 통계 요약(JSON) 추출 (Pipeline Utility Steps 플러그인 필요)
         script {
-          def stats = readJSON file: 'jmeter-report/statistics.json'
-          def t = stats['Total']
+          def stats = readJSON file: "jmeter_${env.BUILD_NUMBER}/html/statistics.json"
+          def t = stats['Total'] ?: stats['ALL'] ?: stats
           def summary = [
             samples   : t.sampleCount,
             errorPct  : t.errorPercentage,
@@ -86,7 +98,9 @@ pipeline {
           ]
           writeJSON file: 'jmeter-summary.json', json: summary, pretty: 2
         }
-        archiveArtifacts artifacts: 'jmeter-results.jtl,jmeter-report/**,jmeter-summary.json', fingerprint: true
+
+        // 아티팩트 보존(백엔드에서 읽기 용이)
+        archiveArtifacts artifacts: "jmeter_${env.BUILD_NUMBER}/**,jmeter-summary.json", fingerprint: true
       }
     }
 
@@ -108,9 +122,8 @@ pipeline {
     stage('Quality Gate') {
       steps {
         timeout(time: 2, unit: 'MINUTES') {
-          // ✅ 변수 대입이 있으니 script 블록 안에서 호출
           script {
-            def qg = waitForQualityGate()   // Sonar → Webhook: http://<jenkins>/sonarqube-webhook/
+            def qg = waitForQualityGate()
             writeJSON file: 'sonar-gate.json', json: [status: qg.status], pretty: 2
           }
           archiveArtifacts artifacts: 'sonar-gate.json', fingerprint: true
@@ -118,9 +131,9 @@ pipeline {
       }
     }
 
-    /* ---- (옵션) Express로 즉시 푸시 ----
+    /* ---- (옵션) Express API로 즉시 푸시 ----
     stage('Publish to DevSecOps API') {
-      when { expression { return false } } // 필요 시 true로
+      when { expression { return false } } // 필요 시 true로 변경
       steps {
         powershell '''
           $j1 = Get-Content jmeter-summary.json -Raw
